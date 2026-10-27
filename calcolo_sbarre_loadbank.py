@@ -9,7 +9,7 @@ import matplotlib.patches as patches
 # CONFIGURAZIONE INTERFACCIA STREAMLIT
 # ==============================================================================
 st.set_page_config(
-    page_title="LOADBANK-MASTER | Telema Busbar Calculator Rev. 2.0",
+    page_title="LOADBANK-MASTER | Telema Busbar Calculator Rev. 2.1",
     page_icon="⚡",
     layout="wide"
 )
@@ -60,7 +60,6 @@ VENTILAZIONE_K4 = {
     "Ambiente interno - conduttori chiusi in guaina non ventilati (K4 = 0,70)": 0.70,
 }
 
-# K5 disaccoppiato da K6 per evitare doppi conteggi incoerenti sui profili C/L
 SUPERFICIE_K5 = {
     "Barre grezze di estrusione o trafilatura (emissività ~0,4)": "grezza",
     "Barre verniciate opache o con termorestringente nero (emissività ~0,9)": "verniciata",
@@ -74,7 +73,6 @@ FORMA_K6 = {
 
 K7_BASE_TABLE = {1: 1.00, 2: 1.79, 3: 2.45, 4: 3.10, 5: 3.70, 6: 4.30}
 
-
 # ==============================================================================
 # 2. MOTORE DI CALCOLO ELETTROTERMICO, CORTOCIRCUITO ED ELETTRODINAMICA
 # ==============================================================================
@@ -85,7 +83,6 @@ def esegui_calcolo_completo(
     mat = METALLI_K1[metallo_str]
     k1 = mat["K1"]
 
-    # K2: Deriva termica temperatura ambiente
     k2 = 1.04 if t_amb == 20 else (
         1.01 if t_amb == 35 else (
             1.00 if t_amb == 40 else (
@@ -94,19 +91,13 @@ def esegui_calcolo_completo(
         )
     )
 
-    # K3: Sovratemperatura ammissibile
     k3_map = {30: 0.86, 40: 1.00, 50: 1.14, 65: 1.38}
     k3 = k3_map.get(dt, 0.0148 * dt + 0.4086)
-
-    # K4: Ventilazione
     k4 = VENTILAZIONE_K4[vent_str]
-
-    # K6: Forma
     k6 = FORMA_K6[forma_str]
     is_profilo_cl = k6 > 1.00
     is_alluminio = "Alluminio" in metallo_str or "alluminio" in metallo_str
 
-    # K5: Emissività superficiale coerente con materiale e geometria K6
     if SUPERFICIE_K5[sup_str] == "grezza":
         k5 = 1.00
     else:
@@ -115,7 +106,6 @@ def esegui_calcolo_completo(
         else:
             k5 = 1.12 if is_alluminio else 1.08
 
-    # K8: Giacitura (di costa vs di piatto)
     if "costa" in giacitura:
         k8 = 1.00
     else:
@@ -126,7 +116,6 @@ def esegui_calcolo_completo(
     sez_1 = float(h * s)
     sez_tot = float(h * s * n)
 
-    # K7: Accoppiamento e spessore efficace per effetto pelle
     if n == 1:
         k7 = 1.00
         s_eff = float(s)
@@ -145,14 +134,12 @@ def esegui_calcolo_completo(
             k7 = k7_std + min(1.0, (d - s) / max(1.0, h - s)) * (0.95 * n - k7_std)
             s_eff = float(s)
 
-    # Profondità di penetrazione (Skin Depth) e K9 sempre stabile per ogni h, s, n
     mu = 4.0 * math.pi * 1e-7 * mat["mu_r"]
     if freq <= 0:
         skin_depth = float("inf")
         k9 = 1.00
     else:
         skin_depth = 1000.0 * math.sqrt(2.0 * 1e-6 * mat["rho"] / (2.0 * math.pi * freq * mu))
-        # Ordinamento geometrico: lato_mag >= lato_min garantisce radicando > 0 sempre
         lato_mag = max(float(h), s_eff)
         lato_min = min(float(h), s_eff)
         area_eq = lato_min * (lato_mag - lato_min) + math.pi * (lato_min ** 2) / 4.0
@@ -176,15 +163,8 @@ def esegui_calcolo_completo(
     k_tot = k1 * k2 * k3 * k4 * k5 * k6 * k7 * k8 * k9
     i_amm = 5.0 * k_tot * (p_1 ** 0.39) * (sez_1 ** 0.5)
     j_dens = i_amm / sez_tot
-
-    # Temperatura operativa di regime
     t_regime = t_amb + dt
 
-    # --------------------------------------------------------------------------
-    # TENUTA AL CORTOCIRCUITO ADIABATICO 1 SECONDO
-    # 1) Metodo rigoroso CEI EN 60865-1 / IEC 60949 con rho(T) variabile (logaritmico)
-    # 2) Metodo semplificato Foglio Excel con rho20 costante
-    # --------------------------------------------------------------------------
     dt_cw = max(0.0, t_lim_cw - t_regime)
     if dt_cw <= 0:
         kcw_iec = 0.0
@@ -198,45 +178,30 @@ def esegui_calcolo_completo(
         )
         icw_1s_iec = (kcw_iec * sez_tot) / 1000.0
 
-        # Calcolo storico da foglio Excel a rho20 costante
         kcw1_ex = math.sqrt((mat["csp"] / 385.0) * (mat["dens"] / 8890.0) * (0.0176 / mat["rho"]))
         kcw2_ex = math.sqrt(385.0 * 8890.0 / 0.0176 / 1e6 * dt_cw)
         icw_1s_excel = (kcw1_ex * kcw2_ex * sez_tot) / 1000.0
 
-    i2t_ammissibile = icw_1s_iec ** 2  # [kA^2 s] a t = 1s
+    i2t_ammissibile = icw_1s_iec ** 2
 
-    # --------------------------------------------------------------------------
-    # BILANCIO TERMICO DISSIPAZIONE JOULE (in watt e chilowatt)
-    # --------------------------------------------------------------------------
-    r_dc_20 = mat["rho"] / sez_tot  # Ohm/m
+    r_dc_20 = mat["rho"] / sez_tot
     r_ac_op = r_dc_20 * (1.0 + mat["alpha"] * (t_regime - 20.0)) / (k9 ** 2)
     p_joule_fase_watt_m = r_ac_op * (i_amm ** 2)
     p_joule_tot_3ph_kw = (3.0 * p_joule_fase_watt_m * lungh_tratta) / 1000.0
 
-    # --------------------------------------------------------------------------
-    # DILATAZIONE TERMICA LINEARE (da posa a 20 °C e per solo salto DT)
-    # --------------------------------------------------------------------------
     t_posa = 20.0
     delta_l_dt_mm = lungh_tratta * 1000.0 * mat["alpha_L"] * dt
     delta_l_tot_posa_mm = lungh_tratta * 1000.0 * mat["alpha_L"] * max(0.0, t_regime - t_posa)
 
-    # --------------------------------------------------------------------------
-    # VERIFICA ELETTRODINAMICA E PASSO SPAZIATORI (CEI EN 60865-1)
-    # --------------------------------------------------------------------------
-    # Fattore di picco kappa = 2.0 (ip = 2 * sqrt(2) * Ik'' ≈ 2.83 * Ik'')
     i_picco_ka = 2.0 * math.sqrt(2.0) * ik_impianto_ka
-    mu0_2pi = 2.0e-7  # N/A^2
+    mu0_2pi = 2.0e-7
 
     if n > 1 and d > 0:
-        # Forza attrattiva mutua tra sub-conduttori della stessa fase [N/m]
         i_picco_sub_a = (i_picco_ka * 1000.0) / n
         dist_baricentri_m = (d + s) / 1000.0
         f_sub_nm = mu0_2pi * (i_picco_sub_a ** 2) / dist_baricentri_m
-        # Modulo di resistenza a flessione W della singola lamina nel piano di attrazione [mm^3]
         w_lamina = (h * (s ** 2)) / 6.0 if "costa" in giacitura else (s * (h ** 2)) / 6.0
-        # Tensione ammissibile per flessione dinamica (0.8 * Rp0.2) [MPa = N/mm^2]
         sigma_amm = 0.8 * mat["rp02"]
-        # Momento flettente trave continua M = q * L^2 / 12 -> L_max [mm]
         l_max_spacers_mm = math.sqrt((12.0 * sigma_amm * w_lamina) / (f_sub_nm / 1000.0))
         l_max_spacers_mm = min(1000.0, max(150.0, l_max_spacers_mm))
     else:
@@ -253,9 +218,8 @@ def esegui_calcolo_completo(
         "F_sub_Nm": f_sub_nm, "L_max_spacers_mm": l_max_spacers_mm, "i_picco_kA": i_picco_ka
     }
 
-
 # ==============================================================================
-# 3. PANNELLO LATERALE DI CONTROLLO (CON VALIDAZIONI PREVENTIVE)
+# 3. PANNELLO LATERALE DI CONTROLLO
 # ==============================================================================
 with st.sidebar:
     st.header("🟢 Consolle di Comando Parametri")
@@ -264,7 +228,7 @@ with st.sidebar:
     h_in = st.number_input("Altezza / Larghezza maggiore h [mm]", min_value=15, max_value=400, value=200, step=5)
     s_max_consentito = max(2, int(h_in // 2))
     s_in = st.number_input(
-        "Spessore sbarra s [mm] (vincolo s ≤ h/2)",
+        "Spessore sbarra s [mm] (vincolo s <= h/2)",
         min_value=2,
         max_value=min(50, s_max_consentito),
         value=min(10, s_max_consentito),
@@ -309,12 +273,10 @@ with st.sidebar:
     st.subheader("4. Ambiente e Ventilazione")
     tamb_in = st.selectbox("Temperatura Ambiente Tamb [°C] (K2)", options=[20, 25, 35, 40, 50, 60, 70], index=4)
     dt_in = st.selectbox("Sovratemperatura di progetto DT [K] (K3)", options=[25, 30, 35, 40, 45, 50, 55, 60, 65, 70], index=5)
-    # Default impostato su indice 0: Aria calma limitata (scelta conservativa di progetto)
     vent_in = st.selectbox("Regime di Ventilazione (K4)", options=list(VENTILAZIONE_K4.keys()), index=0)
     sup_in = st.selectbox("Stato Superficie (K5)", options=list(SUPERFICIE_K5.keys()), index=0)
     forma_in = st.selectbox("Geometria Profilato (K6)", options=list(FORMA_K6.keys()), index=0)
 
-# Esecuzione del calcolo
 res = esegui_calcolo_completo(
     h_in, s_in, n_in, d_in, posa_in, metallo_in, freq_in,
     tamb_in, dt_in, vent_in, sup_in, forma_in, lungh_in, t_lim_cw_in, ik_in
@@ -323,20 +285,19 @@ res = esegui_calcolo_completo(
 # ==============================================================================
 # 4. INTESTAZIONE CON RIFERIMENTI NORMATIVI E AVVISI DI CONFORMITÀ
 # ==============================================================================
-st.title("⚡ LOADBANK-MASTER: Dimensionamento Busbar di Potenza (Rev. 2.0)")
+st.title("⚡ LOADBANK-MASTER: Dimensionamento Busbar di Potenza (Rev. 2.1)")
 st.markdown(
     """
     **Quadro Normativo Applicato:**  
     `DIN 43671 / DIN 43670` (Coefficienti correttivi portata permanente) • 
-    `Metodo Melsom & Booth / CDA Pub. No. 22` (Equazione base DC e mutuo accoppiamento $K_7$) • 
-    `CEI EN 61439-1/2` (Limiti di sovratemperatura $\\Delta T \\le 70\\text{ K}$ e morsetti apparecchiature) • 
-    `CEI EN 60865-1 / IEC 60949` (Cortocircuito adiabatico logaritmico con $\\rho(T)$ variabile e forze elettrodinamiche) • 
-    `Equazioni di Maxwell / Dwight` (Effetto pelle AC $K_9$)
+    `Metodo Melsom & Booth / CDA Pub. No. 22` (Equazione base DC e mutuo accoppiamento K7) • 
+    `CEI EN 61439-1/2` (Limiti di sovratemperatura DeltaT <= 70 K e morsetti apparecchiature) • 
+    `CEI EN 60865-1 / IEC 60949` (Cortocircuito adiabatico logaritmico con rho(T) variabile e forze elettrodinamiche) • 
+    `Equazioni di Maxwell / Dwight` (Effetto pelle AC K9)
     """
 )
 st.markdown("---")
 
-# Alert normativi distinti (Sovratemperatura DT vs Temperatura assoluta isolanti/morsetti)
 if res["T_regime"] > 130:
     st.error(
         f"⚠️ **ALLARME CRITICO ISOLAMENTO**: Temperatura assoluta di regime a {res['T_regime']:.1f} °C "
@@ -346,8 +307,8 @@ if res["T_regime"] > 130:
 elif dt_in > 65 or res["T_regime"] > 105:
     st.warning(
         f"⚠️ **AVVISO INTERFACCE APPARECCHIATURE (CEI EN 61439-1 Tab. 6)**: Temperatura assoluta sbarra = {res['T_regime']:.1f} °C "
-        f"(Sovratemperatura $\\Delta T$ = {dt_in} K). La norma ammette $\\Delta T \\le 70\\text{ K}$ sui terminali nudi, ma i costruttori "
-        f"di interruttori (ACB/MCCB) prescrivono il declassamento per temperature ai morsetti $> 100 \\dots 105\\text{ °C}$."
+        f"(Sovratemperatura DeltaT = {dt_in} K). La norma ammette DeltaT <= 70 K sui terminali nudi, ma i costruttori "
+        f"di interruttori (ACB/MCCB) prescrivono il declassamento per temperature ai morsetti superiori a 100 - 105 °C."
     )
 
 if res["Icw_1s_IEC"] < ik_in:
@@ -441,7 +402,6 @@ if "costa" in posa_in:
     ax1.text(x_start - 15, h_in / 2.0, f"h = {h_in} mm", va='center', ha='right', rotation=90, fontweight='bold', fontsize=9)
 
 else:
-    # Posa orizzontale di piatto: corretto bug grafico per d_in = 0 (barre realmente a contatto)
     d_vert = float(d_in)
     tot_h = n_in * s_in + (n_in - 1) * d_vert
     for i in range(n_in):
@@ -459,7 +419,6 @@ ax1.set_xlabel("Larghezza [mm]")
 ax1.set_ylabel("Altezza [mm]")
 ax1.grid(True, linestyle=':', alpha=0.6)
 
-# Grafico Parametrico Portata vs Distanza
 d_axis = np.linspace(0, max(30, s_in * 3), 60)
 for n_idx in [1, 2, 3, 4]:
     curve_iam = [
@@ -493,27 +452,27 @@ skin_str = "∞ (Corrente Continua DC)" if res["skin"] == float("inf") else f"{r
 
 with col_d1:
     st.markdown("**Verifiche Termofluidodinamiche**")
-    st.write(f"- Temperatura assoluta di regime: **{res['T_regime']:.1f} °C** ($T_{{amb}}={tamb_in}\\text{{ °C}}, \\Delta T={dt_in}\\text{{ K}}$)")
+    st.write(f"- Temperatura assoluta di regime: **{res['T_regime']:.1f} °C** (Tamb = {tamb_in} °C, DeltaT = {dt_in} K)")
     st.write(f"- Dissipazione termica per fase: **{res['P_joule_fase_watt_m']:.1f} watt per metro**")
     st.write(f"- Potenza termica trifase nel vano: **{res['P_joule_tot_3ph_kw']:.2f} chilowatt** (su {lungh_in:.1f} m)")
-    st.write(f"- Profondità di penetrazione $\\delta$: **{skin_str}**")
+    st.write(f"- Profondità di penetrazione: **{skin_str}**")
 
 with col_d2:
     st.markdown("**Dilatazioni Termiche ed Elettrodinamica**")
-    st.write(f"- Dilatazione da posa in officina ($20\\text{{ °C}} \\rightarrow {res['T_regime']:.0f}\\text{{ °C}}$): **{res['Delta_L_posa_mm']:.2f} mm**")
-    st.write(f"- Dilatazione per solo salto termico ($\\Delta T = {dt_in}\\text{{ K}}$): **{res['Delta_L_DT_mm']:.2f} mm**")
+    st.write(f"- Dilatazione da posa in officina (20 °C -> {res['T_regime']:.0f} °C): **{res['Delta_L_posa_mm']:.2f} mm**")
+    st.write(f"- Dilatazione per solo salto termico (DeltaT = {dt_in} K): **{res['Delta_L_DT_mm']:.2f} mm**")
     st.write(f"- Luce minima asola su supporti CAD: **{max(6.0, res['Delta_L_posa_mm'] + 4.0):.1f} mm**")
     if n_in > 1 and d_in > 0:
-        st.write(f"- Forza attrattiva sub-conduttori ($I_p={res['i_picco_kA']:.0f}\\text{{ kA}}$): **{res['F_sub_Nm']:,.0f} N/m**")
-        st.write(f"- Passo max calcolato spaziatori intermedi: **$\\le {res['L_max_spacers_mm']:.0f}$ mm**")
+        st.write(f"- Forza attrattiva sub-conduttori (Ip = {res['i_picco_kA']:.0f} kA): **{res['F_sub_Nm']:,.0f} N/m**")
+        st.write(f"- Passo max calcolato spaziatori intermedi: **<= {res['L_max_spacers_mm']:.0f} mm**")
     else:
-        st.write("- Passo consigliato supporti portanti: **$\\le 500$ mm**")
+        st.write("- Passo consigliato supporti portanti: **<= 500 mm**")
 
 with col_d3:
     st.markdown("**Tenuta al Cortocircuito e Componenti**")
-    st.write(f"- $I_{{cw}}$ 1s rigorosa CEI EN 60865-1 ($\\rho(T)$ variabile): **{res['Icw_1s_IEC']:.1f} kA**")
-    st.write(f"- $I_{{cw}}$ 1s modello Excel ($\rho_{{20}}$ costante): **{res['Icw_1s_Excel']:.1f} kA**")
-    st.write(f"- Integrale di Joule ammissibile ($I^2t$ a 1s): **{res['I2t']:,.0f} kA²s**")
+    st.write(f"- Icw 1s rigorosa CEI EN 60865-1 (rho(T) variabile): **{res['Icw_1s_IEC']:.1f} kA**")
+    st.write(f"- Icw 1s modello Excel (rho20 costante): **{res['Icw_1s_Excel']:.1f} kA**")
+    st.write(f"- Integrale di Joule ammissibile (I^2 t a 1s): **{res['I2t']:,.0f} kA²s**")
     st.write(f"- Isolatori portanti prescritti: **Serie a pettine DMC/SMC 1000V (passo {s_in} mm)**")
 
 # ==============================================================================
@@ -551,8 +510,8 @@ st.dataframe(df_export, use_container_width=True)
 
 csv_data = df_export.to_csv(index=False, sep=";").encode('utf-8')
 st.download_button(
-    label="💾 Scarica Report Tecnico Elettrotermico Rev. 2.0 (CSV)",
+    label="💾 Scarica Report Tecnico Elettrotermico Rev. 2.1 (CSV)",
     data=csv_data,
-    file_name=f"Report_Busbar_Rev2_{n_in}x{h_in}x{s_in}mm.csv",
+    file_name=f"Report_Busbar_Rev21_{n_in}x{h_in}x{s_in}mm.csv",
     mime="text/csv"
 )
